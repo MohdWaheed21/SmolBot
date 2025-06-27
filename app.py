@@ -1,81 +1,114 @@
-from flask import Flask, request, jsonify
+from flask import Flask, render_template, request, jsonify
+import cv2
 import base64
-from io import BytesIO
-from PIL import Image
-import openai  
-import os
+import requests
+import threading
+import time
 
 app = Flask(__name__)
 
-# Configuration - set your OpenAI API key here
-# OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
-# openai.api_key = OPENAI_API_KEY
+# Configuration
+BASE_URL = "http://localhost:8080"
+INTERVAL = 0.5  # seconds
+INSTRUCTION = "What do you see?"
+PROCESSING = False
+CAMERA = None
 
-@app.route('/v1/chat/completions', methods=['POST'])
-def chat_completion():
+def capture_frame():
+    global CAMERA
+    if CAMERA is None or not CAMERA.isOpened():
+        return None
+    
+    ret, frame = CAMERA.read()
+    if not ret:
+        return None
+    
+    # Convert frame to JPEG
+    _, buffer = cv2.imencode('.jpg', frame)
+    return base64.b64encode(buffer).decode('utf-8')
+
+def send_to_smolvlm(instruction, image_base64):
     try:
-        data = request.json
-        
-        # Extract the instruction and image data from the request
-        messages = data.get('messages', [])
-        if not messages:
-            return jsonify({'error': 'No messages provided'}), 400
-            
-        user_message = messages[0]['content']
-        instruction = ""
-        image_data = None
-        
-        # Process the message content which could be mixed text and image
-        for content in user_message:
-            if content['type'] == 'text':
-                instruction = content['text']
-            elif content['type'] == 'image_url':
-                image_url = content['image_url']['url']
-                # Extract base64 data from data URL
-                if image_url.startswith('data:image'):
-                    image_data = image_url.split(',')[1]
-        
-        if not instruction:
-            return jsonify({'error': 'No instruction provided'}), 400
-            
-        if not image_data:
-            return jsonify({'error': 'No image provided'}), 400
-            
-        # Here you would process the image and instruction
-        # For demonstration, we'll just return a simple response
-        response_text = f"I received your instruction: '{instruction}' and an image of size {len(image_data)} bytes."
-        
-        # If you want to actually use OpenAI API:
-        # response = openai.ChatCompletion.create(
-        #     model="gpt-4-vision-preview",
-        #     messages=[
-        #         {
-        #             "role": "user",
-        #             "content": [
-        #                 {"type": "text", "text": instruction},
-        #                 {
-        #                     "type": "image_url",
-        #                     "image_url": {
-        #                         "url": f"data:image/jpeg;base64,{image_data}",
-        #                     },
-        #                 },
-        #             ],
-        #         }
-        #     ],
-        #     max_tokens=300,
-        # )
-        # response_text = response.choices[0].message.content
-        
-        return jsonify({
-            'choices': [{
-                'message': {
-                    'content': response_text
-                }
-            }]
-        })
-        
+        response = requests.post(
+            f"{BASE_URL}/v1/chat/completions",
+            json={
+                "model": "ggml-org/SmolVLM-500M-Instruct-GGUF",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": instruction},
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
+                        ]
+                    }
+                ],
+                "max_tokens": 100
+            },
+            timeout=10
+        )
+        response.raise_for_status()
+        return response.json()['choices'][0]['message']['content']
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return f"Error: {str(e)}"
+
+def processing_loop():
+    global PROCESSING
+    while PROCESSING:
+        start_time = time.time()
+        
+        frame_base64 = capture_frame()
+        if frame_base64:
+            instruction = INSTRUCTION
+            response = send_to_smolvlm(instruction, frame_base64)
+            # In a real app, you'd send this to the frontend via WebSocket or similar
+            
+        # Sleep for the remaining interval time
+        elapsed = time.time() - start_time
+        sleep_time = max(0, INTERVAL - elapsed)
+        time.sleep(sleep_time)
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/start', methods=['POST'])
+def start_processing():
+    global PROCESSING, CAMERA, INSTRUCTION, INTERVAL
+    
+    if not PROCESSING:
+        CAMERA = cv2.VideoCapture(0)
+        if not CAMERA.isOpened():
+            return jsonify({"error": "Could not open camera"}), 400
+        
+        PROCESSING = True
+        INSTRUCTION = request.json.get('instruction', INSTRUCTION)
+        INTERVAL = float(request.json.get('interval', INTERVAL))
+        
+        thread = threading.Thread(target=processing_loop)
+        thread.daemon = True
+        thread.start()
+        
+        return jsonify({"status": "started"})
+    return jsonify({"status": "already running"})
+
+@app.route('/stop', methods=['POST'])
+def stop_processing():
+    global PROCESSING, CAMERA
+    
+    if PROCESSING:
+        PROCESSING = False
+        if CAMERA:
+            CAMERA.release()
+            CAMERA = None
+        return jsonify({"status": "stopped"})
+    return jsonify({"status": "not running"})
+
+@app.route('/frame', methods=['GET'])
+def get_frame():
+    frame_base64 = capture_frame()
+    if frame_base64:
+        return jsonify({"frame": frame_base64})
+    return jsonify({"error": "Could not capture frame"}), 400
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True)

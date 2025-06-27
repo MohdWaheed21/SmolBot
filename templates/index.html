@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Camera Interaction App</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <h1>Camera Interaction App</h1>
+
+    <div class="video-container">
+        <img id="videoFeed" src="" alt="Camera Feed">
+    </div>
+
+    <div class="io-areas">
+        <div>
+            <label for="baseURL">Base API:</label><br>
+            <input id="baseURL" type="text" value="http://localhost:8080">
+        </div>
+        <div>
+            <label for="instructionText">Instruction:</label><br>
+            <textarea id="instructionText" name="Instruction">What do you see?</textarea>
+        </div>
+        <div>
+            <label for="responseText">Response:</label><br>
+            <textarea id="responseText" name="Response" readonly placeholder="Server response will appear here..."></textarea>
+        </div>
+    </div>
+
+    <div class="controls">
+        <label for="intervalSelect">Interval between requests (seconds):</label>
+        <select id="intervalSelect">
+            <option value="0.1">0.1s</option>
+            <option value="0.25">0.25s</option>
+            <option value="0.5" selected>0.5s</option>
+            <option value="1">1s</option>
+            <option value="2">2s</option>
+        </select>
+        <button id="startButton" class="start">Start</button>
+    </div>
+
+    <script>
+        const videoFeed = document.getElementById('videoFeed');
+        const baseURL = document.getElementById('baseURL');
+        const instructionText = document.getElementById('instructionText');
+        const responseText = document.getElementById('responseText');
+        const intervalSelect = document.getElementById('intervalSelect');
+        const startButton = document.getElementById('startButton');
+
+        let isProcessing = false;
+        let frameInterval;
+
+        function updateFrame() {
+            fetch('/frame')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.frame) {
+                        videoFeed.src = `data:image/jpeg;base64,${data.frame}`;
+                    }
+                });
+        }
+
+        function startProcessing() {
+            fetch('/start', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    instruction: instructionText.value,
+                    interval: intervalSelect.value
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'started') {
+                    isProcessing = true;
+                    startButton.textContent = "Stop";
+                    startButton.classList.remove('start');
+                    startButton.classList.add('stop');
+                    instructionText.disabled = true;
+                    intervalSelect.disabled = true;
+                    responseText.value = "Processing started...";
+                    
+                    // Start frame update loop
+                    frameInterval = setInterval(updateFrame, 100);
+                }
+            });
+        }
+
+        function stopProcessing() {
+            fetch('/stop', {
+                method: 'POST'
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'stopped') {
+                    isProcessing = false;
+                    startButton.textContent = "Start";
+                    startButton.classList.remove('stop');
+                    startButton.classList.add('start');
+                    instructionText.disabled = false;
+                    intervalSelect.disabled = false;
+                    responseText.value = "Processing stopped.";
+                    clearInterval(frameInterval);
+                }
+            });
+        }
+
+        startButton.addEventListener('click', () => {
+            if (isProcessing) {
+                stopProcessing();
+            } else {
+                startProcessing();
+            }
+        });
+    </script>
+</body>
+</html>
